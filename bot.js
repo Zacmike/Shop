@@ -1,15 +1,21 @@
-const { Client, GatewayIntentBits } = require("discord.js");
-const { addCurrencyForMessage, addCurrencyForVoice, getUserBalance } = require('./currency'); // Импорт функций работы с базой данных
+const { Client, GatewayIntentBits, PermissionsBitField, Partials } = require("discord.js");
+const { addCurrencyForMessage, addCurrencyForVoice, getUserBalance, setUserBalance } = require('./currency');
 const { token, prefix } = require('./config.json');
 const sqlite3 = require('sqlite3').verbose();
+const fetch = require('node-fetch');
+const sharp = require('sharp');
+const fs = require('fs');
+const path = require('path');
 
-const bot = new Client({ 
+const bot = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildVoiceStates
-    ] 
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildPresences
+    ],
+    partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.GuildMember, Partials.User]
 });
 
 const db = new sqlite3.Database('./currency.sqlite', (err) => {
@@ -26,8 +32,8 @@ bot.once('ready', () => {
     console.log(`Logged in as ${bot.user.tag}!`);
 });
 
-const voiceTimers = new Map(); // Для отслеживания времени, проведенного в голосовых каналах
-const messageCooldowns = new Map(); // Для отслеживания времени последних сообщений
+const voiceTimers = new Map();
+const messageCooldowns = new Map();
 
 bot.on('voiceStateUpdate', (oldState, newState) => {
     const userId = newState.member.id;
@@ -37,20 +43,18 @@ bot.on('voiceStateUpdate', (oldState, newState) => {
     }
 
     if (newState.channelId && !oldState.channelId) {
-        // Пользователь присоединился к голосовому каналу
         const timer = setInterval(() => {
-            addCurrencyForVoice(userId, 2); // Начисление 2 монет каждые 40 минут
-        }, 40 * 60 * 1000); // 40 минут в миллисекундах
+            addCurrencyForVoice(userId, 2);
+        }, 40 * 60 * 1000);
         voiceTimers.set(userId, timer);
     } else if (!newState.channelId && oldState.channelId) {
-        // Пользователь покинул голосовой канал
         clearInterval(voiceTimers.get(userId));
         voiceTimers.delete(userId);
     }
 });
 
 bot.on('messageCreate', async message => {
-    if (message.author.bot || !message.guild) return; // Игнорировать сообщения от ботов и не из гильдий
+    if (message.author.bot || !message.guild) return;
 
     if (message.content.startsWith(prefix)) {
         const args = message.content.slice(prefix.length).trim().split(/ +/);
@@ -58,9 +62,16 @@ bot.on('messageCreate', async message => {
 
         if (command === 'баланс') {
             const balance = await getUserBalance(message.author.id);
-            message.reply(`Ваш баланс: ${balance} монет.`);
+            try {
+                const member = await message.guild.members.fetch(message.author.id);
+                const balanceImage = await generateBalanceImage(member, balance);
+                await message.reply({ files: [{ attachment: balanceImage, name: 'balance.png' }] });
+            } catch (error) {
+                console.error('Error generating balance image:', error);
+                message.reply(`Ваш баланс: ${balance} монет.`);
+            }
         } else if (command === 'начислить') {
-            if (!message.member.permissions.has('ADMINISTRATOR')) {
+            if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
                 return message.reply('У вас нет прав на использование этой команды.');
             }
 
@@ -68,32 +79,107 @@ bot.on('messageCreate', async message => {
                 return message.reply('Использование: !начислить <@пользователь> <количество>');
             }
 
-            const userId = message.mentions.users.first()?.id;
-
-            if (!userId) {
+            const user = message.mentions.users.first();
+            if (!user) {
                 return message.reply('Не удалось определить пользователя. Пожалуйста, укажите пользователя через упоминание (@).');
             }
 
             const amount = parseInt(args[1]);
-
             if (isNaN(amount) || amount <= 0) {
                 return message.reply('Укажите корректное количество монет для начисления.');
             }
 
-            addCurrencyForMessage(userId, amount);
-            message.reply(`Успешно начислено ${amount} монет пользователю ${message.mentions.users.first()}.`);
+            addCurrencyForMessage(user.id, amount);
+            message.reply(`Успешно начислено ${amount} монет пользователю ${user.username}.`);
+        } else if (command === 'списать') {
+            if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+                return message.reply('У вас нет прав на использование этой команды.');
+            }
+
+            if (args.length < 2) {
+                return message.reply('Использование: !списать <@пользователь> <количество>');
+            }
+
+            const user = message.mentions.users.first();
+            if (!user) {
+                return message.reply('Не удалось определить пользователя. Пожалуйста, укажите пользователя через упоминание (@).');
+            }
+
+            const amount = parseInt(args[1]);
+            if (isNaN(amount) || amount <= 0) {
+                return message.reply('Укажите корректное количество монет для списания.');
+            }
+
+            const balance = await getUserBalance(user.id);
+            if (balance < amount) {
+                return message.reply(`Недостаточно средств. Текущий баланс пользователя ${user.username}: ${balance} монет.`);
+            }
+
+            setUserBalance(user.id, balance - amount);
+            message.reply(`Успешно списано ${amount} монет с пользователя ${user.username}.`);
         } else {
             message.reply('Неизвестная команда. Используйте !баланс для проверки баланса.');
         }
     } else {
         const lastMessageTime = messageCooldowns.get(message.author.id);
         const now = Date.now();
+        const cooldown = 5 * 60 * 1000;
 
-        if (!lastMessageTime || (now - lastMessageTime) >= 5 * 60 * 1000) { // 5 минут в миллисекундах
+        if (!lastMessageTime || (now - lastMessageTime) >= cooldown) {
             addCurrencyForMessage(message.author.id, 1);
             messageCooldowns.set(message.author.id, now);
         }
     }
 });
+
+async function generateBalanceImage(member, balance) {
+    try {
+        const avatarUrl = member.user.displayAvatarURL({ format: 'png', size: 256 });
+        const avatarResponse = await fetch(avatarUrl);
+        const avatarBuffer = await avatarResponse.buffer();
+
+        const avatar = await sharp(avatarBuffer)
+            .resize(200, 200)
+            .png()
+            .toBuffer();
+
+        const image = sharp({
+            create: {
+                width: 700,
+                height: 250,
+                channels: 4,
+                background: { r: 40, g: 10, b: 20, alpha: 1 }
+            }
+        });
+
+        const fontPath = path.join(__dirname, 'assets/fonts/Feral.ttf');
+        const textSvg = `
+            <svg width="700" height="250">
+                <style>
+                    @font-face {
+                        font-family: 'Feral';
+                        src: url('file://${fontPath}');
+                    }
+                    .title { fill: white; font-size: 48px; font-family: 'Feral'; font-weight: bold; }
+                    .balance { fill: white; font-size: 36px; font-family: 'Feral'; }
+                </style>
+                <text x="250" y="100" class="title">${member.displayName}</text>
+                <text x="250" y="150" class="balance">Ваш баланс: ${balance} монет</text>
+            </svg>
+        `;
+
+        const textBuffer = Buffer.from(textSvg);
+
+        const compositeImage = await image
+            .composite([{ input: avatar, top: 25, left: 25 }, { input: textBuffer, top: 0, left: 0 }])
+            .png()
+            .toBuffer();
+
+        return compositeImage;
+    } catch (error) {
+        console.error('Failed to generate balance image:', error);
+        throw new Error('Failed to generate balance image');
+    }
+}
 
 bot.login(token);
