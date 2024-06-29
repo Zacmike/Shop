@@ -1,20 +1,18 @@
-const sqlite3 = require('sqlite3').verbose();
-const db = new sqlite3.Database('./currency.sqlite');
+const { getUserBalance, setUserBalance } = require('./currency');
 
-function buyItem(userId, itemId, itemCost) {
-    return new Promise((resolve, reject) => {
-        db.get('SELECT balance FROM users WHERE id = ?', [userId], (err, row) => {
-            if (err) return reject(err);
-            if (row.balance < itemCost) {
-                return reject(new Error('Недостаточно средств'));
-            }
+async function buyItem(userId, itemId, itemCost) {
+    const balance = await getUserBalance(userId);
 
-            db.run('UPDATE users SET balance = balance - ? WHERE id = ?', [itemCost, userId], (err) => {
-                if (err) return reject(err);
-                resolve();
-            });
-        });
-    });
+    if (balance < itemCost) {
+        throw new Error('Недостаточно средств для покупки этого предмета.');
+    }
+
+    await setUserBalance(userId, balance - itemCost);
+    // Логика добавления предмета пользователю (например, обновление инвентаря в базе данных)
+    // Пример:
+    // await addItemToUserInventory(userId, itemId);
+
+    return true;
 }
 
 module.exports = { buyItem };
