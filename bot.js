@@ -6,6 +6,8 @@ const fetch = require('node-fetch');
 const sharp = require('sharp');
 const fs = require('fs');
 const path = require('path');
+const { createCanvas, loadImage, registerFont } = require('canvas');
+const { buyItem } = require('./shop'); // Импорт функции покупки предметов
 
 const bot = new Client({
     intents: [
@@ -117,6 +119,34 @@ bot.on('messageCreate', async message => {
 
             setUserBalance(user.id, balance - amount);
             message.reply(`Успешно списано ${amount} монет с пользователя ${user.username}.`);
+        } else if (command === 'купить') {
+            if (args.length < 1) {
+                return message.reply('Использование: !купить <id_предмета>');
+            }
+
+            const itemId = args[0];
+            const itemCost = 10; // This should be replaced with actual item cost logic
+
+            try {
+                await buyItem(message.author.id, itemId, itemCost);
+                message.reply(`Вы успешно купили предмет с ID ${itemId} за ${itemCost} монет.`);
+            } catch (error) {
+                message.reply(`Ошибка при покупке: ${error.message}`);
+            }
+        } else if (command === 'магазин') {
+            // This should be replaced with actual shop items logic
+            const shopItems = [
+                { id: '1', name: 'Item 1', cost: 10 },
+                { id: '2', name: 'Item 2', cost: 20 },
+                { id: '3', name: 'Item 3', cost: 30 },
+            ];
+
+            let shopMessage = 'Доступные предметы в магазине:\n';
+            shopItems.forEach(item => {
+                shopMessage += `ID: ${item.id}, Название: ${item.name}, Цена: ${item.cost} монет\n`;
+            });
+
+            message.reply(shopMessage);
         } else {
             message.reply('Неизвестная команда. Используйте !баланс для проверки баланса.');
         }
@@ -143,14 +173,15 @@ async function generateBalanceImage(member, balance) {
             .png()
             .toBuffer();
 
-        const image = sharp({
-            create: {
-                width: 700,
-                height: 250,
-                channels: 4,
-                background: { r: 40, g: 10, b: 20, alpha: 1 }
-            }
-        });
+        const backgroundUrl = 'https://i.pinimg.com/564x/30/e5/ec/30e5ec8f1ec47882de36ee53e26fada9.jpg';
+        const backgroundResponse = await fetch(backgroundUrl);
+        const backgroundBuffer = await backgroundResponse.buffer();
+
+        const background = await sharp(backgroundBuffer)
+            .resize(700, 250)
+            .toBuffer();
+
+        const image = sharp(background);
 
         const fontPath = path.join(__dirname, 'assets/fonts/Feral.ttf');
         const textSvg = `
@@ -161,7 +192,7 @@ async function generateBalanceImage(member, balance) {
                         src: url('file://${fontPath}');
                     }
                     .title { fill: white; font-size: 48px; font-family: 'Feral'; font-weight: bold; }
-                    .balance { fill: white; font-size: 36px; font-family: 'Feral'; }
+                    .balance { fill: white; font-size: 36px; font-family: 'Feral'; font-weight: bold; }
                 </style>
                 <text x="250" y="100" class="title">${member.displayName}</text>
                 <text x="250" y="150" class="balance">Ваш баланс: ${balance} монет</text>
