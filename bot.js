@@ -213,4 +213,41 @@ async function generateBalanceImage(member, balance) {
     }
 }
 
+function closeGame(channelId) {
+  const gameData = activeGames.get(channelId);
+  if (gameData) {
+    clearTimeout(gameData.betCollectionTimeout);
+    clearTimeout(gameData.gameCloseTimeout);
+    
+    const message = `Игра в канале <#${channelId}> была автоматически закрыта по истечении времени.`;
+    
+    const channel = client.channels.cache.get(channelId);
+    if (channel) {
+      channel.send(message);
+    }
+    
+    if (gameData.bets.size > 0) {
+      returnBets(channelId);
+    }
+    
+    activeGames.delete(channelId);
+  }
+}
+
+function returnBets(channelId) {
+  const gameData = activeGames.get(channelId);
+  if (gameData && gameData.bets) {
+    for (const [team, bets] of gameData.bets) {
+      for (const bet of bets) {
+        getUserBalance(bet.userId).then(balance => {
+          setUserBalance(bet.userId, balance + bet.amount)
+            .then(() => console.log(`Возвращено ${bet.amount} монет пользователю ${bet.userId}`))
+            .catch(error => console.error(`Ошибка при возврате ставки пользователю ${bet.userId}:`, error));
+        }).catch(error => console.error(`Ошибка при получении баланса пользователя ${bet.userId}:`, error));
+      }
+    }
+    gameData.bets.clear();
+  }
+}
+
 bot.login(token);
